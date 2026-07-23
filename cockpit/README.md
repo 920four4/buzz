@@ -1,55 +1,49 @@
-# Cockpit · Buzz mission control
+# Cockpit · for Buzz
 
-A **non-Slack** UX for [Buzz](https://github.com/block/buzz): home is “needs you,” work rooms are outcomes, agents render as verb · object · outcome.
+A **human-first** client for [Buzz](https://github.com/block/buzz) — not Slack with agents.
 
-Cockpit is a thin browser client. The Buzz **relay** stays the source of truth (Nostr NIP-01 / NIP-29 / NIP-42).
+| Nav | What it is |
+|-----|------------|
+| **Inbox** | Things that need a human (approve / unblock / reply) |
+| **Work** | Goals as cards — not `#channels` |
+| **Agents** | Teammates with faces |
+| **Messages** | Side chats only |
+
+Same foundation: NIP-42 auth, stream messages, agent identity. Different front door.
+
+Interactive preview works offline; connect a local relay when you want live events.
+
+**Live:** https://buzz-cockpit-coral.vercel.app
 
 ## Quick start
 
 ```bash
-# from repo root — deps + Docker + migrations + relay
+# relay (repo root)
 . ./bin/activate-hermit
-just setup          # once
-just relay          # ws://127.0.0.1:3000
+just setup && just relay   # ws://127.0.0.1:3000
 
-# cockpit UI
+# cockpit
 cd cockpit
 pnpm install
-pnpm dev            # http://localhost:5174  (proxies /relay-ws → :3000)
+pnpm dev                   # http://127.0.0.1:5174
+# or: portless alias → https://cockpit.localhost:1355
 ```
 
-### Portless (named .localhost URL)
+## Try the demo (what “works” means)
+
+1. **Inbox → Approve** release notes — toast, card slides away, work marks done  
+2. **Allow** Honey — agent flips to Working, work unblocks  
+3. **Work → open a card → add a note**  
+4. **Agents** — stop running, inspect status  
+5. **⌘K** — search work / inbox / agents  
+
+## Deploy
 
 ```bash
 cd cockpit
-portless run pnpm dev   # https://cockpit.localhost
-```
-
-### Demo mode
-
-If the relay is down, Cockpit loads **demo rooms / needs / agent feed** so you can still review the UX.
-
-## Deploy (Vercel)
-
-```bash
-cd cockpit
-vercel link --yes --scope 920four4s-projects --project buzz-cockpit
 vercel --prod --yes --scope 920four4s-projects
 ```
 
-Production (team **920four4's projects**): https://buzz-cockpit-coral.vercel.app
+Optional env: `VITE_BUZZ_RELAY_WS`, `VITE_BUZZ_RELAY_AUTH_URL`
 
-Set optional env on the project:
-
-| Env | Purpose |
-|-----|---------|
-| `VITE_BUZZ_RELAY_WS` | Public `wss://…` relay for production |
-| `VITE_BUZZ_RELAY_AUTH_URL` | NIP-42 auth URL if it differs from the WS URL |
-
-Static SPA (`vite` → `dist`). Author commits as `team@920four.com`.
-
-## Stack
-
-- Vite + React 19 + Tailwind 4
-- `nostr-tools` (sign + NIP-42)
-- Proxy in dev: `/relay-ws` → Buzz relay
+Git author for this fork: `team@920four.com`
