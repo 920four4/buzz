@@ -33,9 +33,11 @@ If the relay is down, Cockpit loads **demo rooms / needs / agent feed** so you c
 
 ```bash
 cd cockpit
-vercel link --yes --scope 920four   # or your team
-vercel --prod --yes
+vercel link --yes --scope 920four4s-projects --project buzz-cockpit
+vercel --prod --yes --scope 920four4s-projects
 ```
+
+Production (team **920four4's projects**): https://buzz-cockpit-coral.vercel.app
 
 Set optional env on the project:
 
