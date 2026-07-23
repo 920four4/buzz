@@ -1,25 +1,26 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Compass,
-  LayoutGrid,
-  Plus,
-  Radio,
-  RefreshCw,
+  Bot,
+  Inbox,
+  Layers,
+  MessageSquare,
   Search,
   Settings2,
   Zap,
 } from "lucide-react";
 import clsx from "clsx";
-import { AgentFeed } from "@/components/AgentFeed";
-import { NeedsCard } from "@/components/NeedsCard";
-import { RoomCard } from "@/components/RoomCard";
-import { RoomPanel } from "@/components/RoomPanel";
-import { StatusPill } from "@/components/StatusPill";
+import { AgentsView } from "@/components/AgentsView";
+import { InboxView } from "@/components/InboxView";
+import { MessagesView } from "@/components/MessagesView";
+import { WorkView } from "@/components/WorkView";
 import {
-  DEMO_ACTIVITY,
-  DEMO_NEEDS,
-  DEMO_ROOMS,
-  type DemoRoom,
+  DEMO_AGENTS,
+  DEMO_INBOX,
+  DEMO_MESSAGES,
+  DEMO_WORK,
+  type Agent,
+  type InboxItem,
+  type WorkItem,
 } from "@/lib/demo";
 import {
   getOrCreateIdentity,
@@ -27,91 +28,57 @@ import {
   shortPubkey,
   type Identity,
 } from "@/lib/identity";
+import { useToast } from "@/lib/toast";
 import {
   getRelayWsUrl,
   RelaySession,
-  roomAboutFromEvent,
-  roomIdFromEvent,
-  roomNameFromEvent,
   setRelayWsUrl,
   type ConnectionState,
 } from "@/lib/relay";
 
-type View = "home" | "rooms" | "settings";
+type Nav = "inbox" | "work" | "agents" | "messages" | "settings";
+
+const navItems: { id: Nav; label: string; icon: typeof Inbox }[] = [
+  { id: "inbox", label: "Inbox", icon: Inbox },
+  { id: "work", label: "Work", icon: Layers },
+  { id: "agents", label: "Agents", icon: Bot },
+  { id: "messages", label: "Messages", icon: MessageSquare },
+];
 
 export default function App() {
+  const { push } = useToast();
   const [identity, setIdentity] = useState<Identity>(() =>
-    getOrCreateIdentity("Operator"),
+    getOrCreateIdentity("You"),
   );
-  const [view, setView] = useState<View>("home");
+  const [nav, setNav] = useState<Nav>("inbox");
+  const [inbox, setInbox] = useState<InboxItem[]>(DEMO_INBOX);
+  const [work, setWork] = useState<WorkItem[]>(DEMO_WORK);
+  const [agents, setAgents] = useState<Agent[]>(DEMO_AGENTS);
+  const [selectedWork, setSelectedWork] = useState<string | null>(null);
   const [conn, setConn] = useState<ConnectionState>("idle");
-  const [connDetail, setConnDetail] = useState<string | undefined>();
-  const [session, setSession] = useState<RelaySession | null>(null);
-  const [demo, setDemo] = useState(true);
-  const [rooms, setRooms] = useState<DemoRoom[]>(DEMO_ROOMS);
-  const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
+  const [live, setLive] = useState(false);
   const [relayInput, setRelayInput] = useState(getRelayWsUrl());
   const [nameInput, setNameInput] = useState(identity.displayName);
-  const [busy, setBusy] = useState(false);
-  const [banner, setBanner] = useState<string | null>(null);
-  const [newRoomName, setNewRoomName] = useState("");
-
-  const selectedRoom = useMemo(
-    () => rooms.find((r) => r.id === selectedRoomId) ?? null,
-    [rooms, selectedRoomId],
-  );
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQ, setSearchQ] = useState("");
+  const [session, setSession] = useState<RelaySession | null>(null);
 
   const connect = useCallback(
     async (id: Identity, url: string) => {
-      setBusy(true);
-      setBanner(null);
       session?.disconnect();
       const next = new RelaySession(id, url);
       setSession(next);
-      const unsub = next.onState((s, detail) => {
-        setConn(s);
-        setConnDetail(detail);
-      });
+      next.onState((s) => setConn(s));
       try {
         await next.connect();
         try {
-          await next.publishProfile(id.displayName);
+          await next.publishProfile(id.displayName || "You");
         } catch {
-          // profile publish optional on locked relays
+          /* optional */
         }
-        const events = await next.listRooms();
-        if (events.length > 0) {
-          const mapped: DemoRoom[] = events.map((ev) => ({
-            id: roomIdFromEvent(ev),
-            name: roomNameFromEvent(ev),
-            about: roomAboutFromEvent(ev) || "Work room on the relay",
-            status: "active",
-            lastActivity: "from relay",
-            people: 1,
-            agents: 0,
-          }));
-          setRooms(mapped);
-          setDemo(false);
-          setBanner(null);
-        } else {
-          setRooms(DEMO_ROOMS);
-          setDemo(true);
-          setBanner(
-            "Connected to relay — no rooms yet. Showing demo rooms until you create one.",
-          );
-        }
-      } catch (e) {
-        setDemo(true);
-        setRooms(DEMO_ROOMS);
-        setBanner(
-          e instanceof Error
-            ? `Relay unavailable (${e.message}). Running in demo mode.`
-            : "Relay unavailable. Running in demo mode.",
-        );
-      } finally {
-        setBusy(false);
-        // keep unsub for session lifetime via effect cleanup if we store it
-        void unsub;
+        setLive(true);
+      } catch {
+        setLive(false);
       }
     },
     [session],
@@ -119,386 +86,481 @@ export default function App() {
 
   useEffect(() => {
     void connect(identity, getRelayWsUrl());
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- boot once
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function handleSaveSettings(e: React.FormEvent) {
-    e.preventDefault();
-    setRelayWsUrl(relayInput.trim());
-    const nextId = getOrCreateIdentity(nameInput.trim() || "Operator");
-    setIdentity(nextId);
-    await connect(nextId, relayInput.trim());
-    setView("home");
-  }
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+      if (e.key === "Escape") setSearchOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
-  async function handleCreateRoom(e: React.FormEvent) {
-    e.preventDefault();
-    const name = newRoomName.trim();
-    if (!name) return;
-    if (demo || !session) {
-      const id = `local-${Date.now()}`;
-      setRooms((prev) => [
-        {
-          id,
-          name,
-          about: "Local demo room",
-          status: "active",
-          lastActivity: "just now",
-          people: 1,
-          agents: 0,
-        },
-        ...prev,
-      ]);
-      setSelectedRoomId(id);
-      setNewRoomName("");
-      setView("rooms");
-      return;
+  const searchHits = useMemo(() => {
+    const q = searchQ.trim().toLowerCase();
+    if (!q) return [];
+    const hits: { type: string; title: string; go: () => void }[] = [];
+    for (const i of inbox) {
+      if (i.title.toLowerCase().includes(q) || i.body.toLowerCase().includes(q)) {
+        hits.push({
+          type: "Inbox",
+          title: i.title,
+          go: () => {
+            setNav("inbox");
+            setSearchOpen(false);
+          },
+        });
+      }
     }
-    setBusy(true);
-    try {
-      await session.createRoom(name, "Created from Cockpit");
-      setNewRoomName("");
-      await connect(identity, session.relayUrl);
-      setView("rooms");
-    } catch (err) {
-      setBanner(err instanceof Error ? err.message : "Create room failed");
-    } finally {
-      setBusy(false);
+    for (const w of work) {
+      if (
+        w.title.toLowerCase().includes(q) ||
+        w.goal.toLowerCase().includes(q)
+      ) {
+        hits.push({
+          type: "Work",
+          title: w.title,
+          go: () => {
+            setNav("work");
+            setSelectedWork(w.id);
+            setSearchOpen(false);
+          },
+        });
+      }
+    }
+    for (const a of agents) {
+      if (a.name.toLowerCase().includes(q) || a.role.toLowerCase().includes(q)) {
+        hits.push({
+          type: "Agent",
+          title: a.name,
+          go: () => {
+            setNav("agents");
+            setSearchOpen(false);
+          },
+        });
+      }
+    }
+    return hits.slice(0, 8);
+  }, [searchQ, inbox, work, agents]);
+
+  function resolveInbox(id: string) {
+    setInbox((prev) => prev.filter((i) => i.id !== id));
+    const item = inbox.find((i) => i.id === id);
+    if (item?.kind === "approve") {
+      setWork((prev) =>
+        prev.map((w) =>
+          w.id === item.workId
+            ? {
+                ...w,
+                status: "done" as const,
+                updates: [
+                  {
+                    id: `u-${Date.now()}`,
+                    author: "You",
+                    isAgent: false,
+                    text: "Approved. Ship it.",
+                    when: "now",
+                  },
+                  ...w.updates,
+                ],
+              }
+            : w,
+        ),
+      );
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.id === "bumble"
+            ? { ...a, status: "idle" as const, doing: "Ready for the next task" }
+            : a,
+        ),
+      );
+    }
+    if (item?.kind === "unblock") {
+      setWork((prev) =>
+        prev.map((w) =>
+          w.id === item.workId
+            ? {
+                ...w,
+                status: "moving" as const,
+                updates: [
+                  {
+                    id: `u-${Date.now()}`,
+                    author: "Honey",
+                    isAgent: true,
+                    text: "Thanks — opening the patch now.",
+                    when: "now",
+                  },
+                  ...w.updates,
+                ],
+              }
+            : w,
+        ),
+      );
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.id === "honey"
+            ? {
+                ...a,
+                status: "working" as const,
+                doing: "Opening patch for login bug…",
+              }
+            : a,
+        ),
+      );
     }
   }
-
-  const connTone =
-    conn === "connected"
-      ? "live"
-      : conn === "error" || conn === "closed"
-        ? "danger"
-        : conn === "connecting" || conn === "authenticating"
-          ? "warn"
-          : "mute";
 
   return (
-    <div className="min-h-full flex flex-col">
-      {/* Top bar — command strip, not Slack header */}
-      <header className="sticky top-0 z-20 border-b border-line/80 bg-ink/90 backdrop-blur-md">
-        <div className="mx-auto max-w-[1400px] px-4 sm:px-6 py-3 flex items-center gap-4">
-          <div className="flex items-center gap-2.5 shrink-0">
-            <div className="size-8 rounded-xl bg-amber text-ink flex items-center justify-center">
-              <Zap className="size-4" strokeWidth={2.5} />
-            </div>
-            <div>
-              <div className="text-sm font-bold tracking-tight">Cockpit</div>
-              <div className="text-[10px] uppercase tracking-[0.16em] text-mute">
-                Buzz · mission control
-              </div>
-            </div>
+    <div className="flex h-full min-h-0 bg-cream grain">
+      {/* Sidebar */}
+      <aside className="hidden w-[220px] shrink-0 flex-col border-r border-line bg-sidebar/90 px-3 py-4 sm:flex">
+        <div className="mb-6 flex items-center gap-2.5 px-2">
+          <div className="flex size-9 items-center justify-center rounded-2xl bg-honey text-ink shadow-sm">
+            <Zap className="size-4" strokeWidth={2.5} />
           </div>
-
-          <nav className="hidden sm:flex items-center gap-1 ml-4">
-            {(
-              [
-                ["home", "Needs me", Compass],
-                ["rooms", "Work rooms", LayoutGrid],
-                ["settings", "Relay", Settings2],
-              ] as const
-            ).map(([id, label, Icon]) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setView(id)}
-                className={clsx(
-                  "inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition-colors",
-                  view === id
-                    ? "bg-ink-3 text-paper"
-                    : "text-mute hover:text-paper hover:bg-ink-2",
-                )}
-              >
-                <Icon className="size-3.5" />
-                {label}
-              </button>
-            ))}
-          </nav>
-
-          <div className="ml-auto flex items-center gap-2 sm:gap-3">
-            <StatusPill tone={connTone} live={conn === "connected"}>
-              {conn}
-            </StatusPill>
-            {demo && <StatusPill tone="warn">demo data</StatusPill>}
-            <div className="hidden md:block text-right">
-              <div className="text-xs font-medium text-paper">
-                {identity.displayName}
-              </div>
-              <div className="text-[10px] font-mono text-mute">
-                {shortPubkey(identity.pubkey, 5)}
-              </div>
+          <div>
+            <div className="text-sm font-bold tracking-tight">Cockpit</div>
+            <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-mute">
+              for Buzz
             </div>
           </div>
         </div>
-      </header>
 
-      {banner && (
-        <div className="border-b border-amber/25 bg-amber/10 text-amber text-sm px-4 py-2 text-center">
-          {banner}
-        </div>
-      )}
+        <button
+          type="button"
+          onClick={() => setSearchOpen(true)}
+          className="mb-4 flex items-center gap-2 rounded-2xl border border-line bg-paper px-3 py-2 text-sm text-mute shadow-sm hover:border-line-strong"
+        >
+          <Search className="size-3.5" />
+          <span className="flex-1 text-left">Search</span>
+          <kbd className="rounded-md bg-cream-2 px-1.5 py-0.5 font-mono text-[10px]">
+            ⌘K
+          </kbd>
+        </button>
 
-      <main className="flex-1 mx-auto w-full max-w-[1400px] px-4 sm:px-6 py-6">
-        {view === "home" && (
-          <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 animate-fade-up">
-            <section className="xl:col-span-5 space-y-4">
-              <div className="flex items-end justify-between gap-3">
-                <div>
-                  <h1 className="text-2xl font-semibold tracking-tight">
-                    Needs you
-                  </h1>
-                  <p className="text-sm text-mute mt-1">
-                    Approvals, blocked agents, mentions — not a channel list.
-                  </p>
-                </div>
-                <StatusPill tone="danger">{DEMO_NEEDS.length} open</StatusPill>
-              </div>
-              <div className="space-y-3">
-                {DEMO_NEEDS.map((item) => (
-                  <NeedsCard
-                    key={item.id}
-                    item={item}
-                    onOpen={() => {
-                      const match = rooms.find((r) =>
-                        item.room.includes(r.name.split("/").pop()?.trim() || "___"),
-                      );
-                      if (match) {
-                        setSelectedRoomId(match.id);
-                        setView("rooms");
-                      } else if (rooms[0]) {
-                        setSelectedRoomId(rooms[0].id);
-                        setView("rooms");
-                      }
-                    }}
-                  />
-                ))}
-              </div>
-            </section>
-
-            <section className="xl:col-span-4 space-y-4">
-              <div className="flex items-end justify-between">
-                <div>
-                  <h2 className="text-lg font-semibold">Active rooms</h2>
-                  <p className="text-sm text-mute mt-0.5">
-                    Outcomes first. Chat lives inside the work.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setView("rooms")}
-                  className="text-xs text-amber hover:underline"
-                >
-                  View all
-                </button>
-              </div>
-              <div className="grid gap-3">
-                {rooms
-                  .filter((r) => r.status === "active" || r.status === "blocked")
-                  .slice(0, 4)
-                  .map((room) => (
-                    <RoomCard
-                      key={room.id}
-                      room={room}
-                      onSelect={() => {
-                        setSelectedRoomId(room.id);
-                        setView("rooms");
-                      }}
-                    />
-                  ))}
-              </div>
-            </section>
-
-            <section className="xl:col-span-3">
-              <AgentFeed items={DEMO_ACTIVITY} />
-            </section>
-          </div>
-        )}
-
-        {view === "rooms" && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 min-h-[70vh]">
-            <aside className="lg:col-span-4 xl:col-span-3 space-y-3">
-              <div className="flex items-center justify-between">
-                <h1 className="text-xl font-semibold">Work rooms</h1>
-                <StatusPill tone="mute">{rooms.length}</StatusPill>
-              </div>
-              <form onSubmit={handleCreateRoom} className="flex gap-2">
-                <input
-                  value={newRoomName}
-                  onChange={(e) => setNewRoomName(e.target.value)}
-                  placeholder="New room name…"
-                  className="flex-1 rounded-xl border border-line bg-ink-2 px-3 py-2 text-sm focus:outline-none focus:border-amber/50"
-                />
-                <button
-                  type="submit"
-                  disabled={busy}
-                  className="rounded-xl bg-ink-3 border border-line px-3 text-amber hover:border-amber/40"
-                  aria-label="Create room"
-                >
-                  <Plus className="size-4" />
-                </button>
-              </form>
-              <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1">
-                {rooms.map((room) => (
-                  <RoomCard
-                    key={room.id}
-                    room={room}
-                    selected={room.id === selectedRoomId}
-                    onSelect={() => setSelectedRoomId(room.id)}
-                  />
-                ))}
-              </div>
-            </aside>
-            <div className="lg:col-span-8 xl:col-span-9 min-h-[420px]">
-              {selectedRoom ? (
-                <RoomPanel
-                  roomId={selectedRoom.id}
-                  roomName={selectedRoom.name}
-                  roomAbout={selectedRoom.about}
-                  session={session}
-                  demo={demo}
-                  onClose={() => setSelectedRoomId(null)}
-                />
-              ) : (
-                <div className="h-full min-h-[420px] rounded-2xl border border-dashed border-line flex flex-col items-center justify-center text-center px-6">
-                  <Search className="size-8 text-mute mb-3" />
-                  <h2 className="text-lg font-medium">Pick a work room</h2>
-                  <p className="text-sm text-mute mt-1 max-w-sm">
-                    Rooms are outcomes (branches, incidents, releases) — not a
-                    FOMO sidebar of #general.
-                  </p>
-                </div>
+        <nav className="flex flex-1 flex-col gap-0.5">
+          {navItems.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => {
+                setNav(id);
+                if (id !== "work") setSelectedWork(null);
+              }}
+              className={clsx(
+                "flex items-center gap-2.5 rounded-2xl px-3 py-2.5 text-sm font-medium transition",
+                nav === id
+                  ? "bg-paper text-ink shadow-sm"
+                  : "text-ink-soft hover:bg-paper/60",
               )}
-            </div>
-          </div>
-        )}
-
-        {view === "settings" && (
-          <div className="max-w-xl mx-auto animate-fade-up">
-            <h1 className="text-2xl font-semibold">Relay & identity</h1>
-            <p className="text-sm text-mute mt-1 mb-6">
-              Cockpit is a thin client. The Buzz relay is the workspace.
-              Author / deploy identity:{" "}
-              <span className="font-mono text-soft">team@920four.com</span>
-            </p>
-
-            <form
-              onSubmit={handleSaveSettings}
-              className="space-y-4 rounded-2xl border border-line bg-ink-2/70 p-5"
             >
-              <label className="block">
-                <span className="text-xs uppercase tracking-wider text-mute">
-                  Display name
+              <Icon className="size-4 opacity-80" />
+              {label}
+              {id === "inbox" && inbox.length > 0 && (
+                <span className="ml-auto flex size-5 items-center justify-center rounded-full bg-honey text-[10px] font-bold text-ink">
+                  {inbox.length}
                 </span>
-                <input
-                  value={nameInput}
-                  onChange={(e) => setNameInput(e.target.value)}
-                  className="mt-1.5 w-full rounded-xl border border-line bg-ink px-3 py-2 text-sm focus:outline-none focus:border-amber/50"
-                />
-              </label>
-              <label className="block">
-                <span className="text-xs uppercase tracking-wider text-mute">
-                  Relay WebSocket URL
-                </span>
-                <input
-                  value={relayInput}
-                  onChange={(e) => setRelayInput(e.target.value)}
-                  placeholder="ws://127.0.0.1:3000 or /relay-ws"
-                  className="mt-1.5 w-full rounded-xl border border-line bg-ink px-3 py-2 text-sm font-mono focus:outline-none focus:border-amber/50"
-                />
-                <span className="mt-1 block text-xs text-mute">
-                  Local dev defaults to Vite proxy{" "}
-                  <code className="text-sky">/relay-ws</code> →{" "}
-                  <code className="text-sky">:3000</code>
-                </span>
-              </label>
+              )}
+            </button>
+          ))}
+        </nav>
 
-              <div className="rounded-xl border border-line bg-ink/50 p-3 text-xs font-mono text-mute space-y-1">
-                <div className="flex justify-between gap-2">
-                  <span>pubkey</span>
-                  <span className="text-soft break-all text-right">
-                    {identity.pubkey}
-                  </span>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <span>state</span>
-                  <span className="text-soft">
-                    {conn}
-                    {connDetail ? ` · ${connDetail}` : ""}
-                  </span>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap gap-2 pt-1">
-                <button
-                  type="submit"
-                  disabled={busy}
-                  className="inline-flex items-center gap-2 rounded-xl bg-amber px-4 py-2 text-sm font-semibold text-ink hover:bg-amber-dim disabled:opacity-50"
-                >
-                  <Radio className="size-4" />
-                  Connect
-                </button>
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void connect(identity, getRelayWsUrl())}
-                  className="inline-flex items-center gap-2 rounded-xl border border-line bg-ink-3 px-4 py-2 text-sm text-paper hover:border-soft/40"
-                >
-                  <RefreshCw className="size-4" />
-                  Retry
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const next = resetIdentity(nameInput || "Operator");
-                    setIdentity(next);
-                    void connect(next, getRelayWsUrl());
-                  }}
-                  className="inline-flex items-center gap-2 rounded-xl border border-line px-4 py-2 text-sm text-mute hover:text-coral hover:border-coral/40"
-                >
-                  New keypair
-                </button>
-              </div>
-            </form>
-
-            <div className="mt-6 rounded-2xl border border-line p-5 text-sm text-soft space-y-2">
-              <h2 className="font-semibold text-paper">How this differs from Slack</h2>
-              <ul className="list-disc pl-5 space-y-1 text-mute">
-                <li>Home is “needs you,” not #general</li>
-                <li>Rooms are work units (branch / incident / release)</li>
-                <li>Agents show as verb · object · outcome</li>
-                <li>Same Buzz relay protocol — different lens</li>
-              </ul>
-            </div>
-          </div>
-        )}
-      </main>
-
-      {/* Mobile nav */}
-      <nav className="sm:hidden sticky bottom-0 border-t border-line bg-ink/95 backdrop-blur flex">
-        {(
-          [
-            ["home", "Needs", Compass],
-            ["rooms", "Rooms", LayoutGrid],
-            ["settings", "Relay", Settings2],
-          ] as const
-        ).map(([id, label, Icon]) => (
-          <button
-            key={id}
-            type="button"
-            onClick={() => setView(id)}
+        <div className="mt-auto space-y-2 px-1">
+          <div
             className={clsx(
-              "flex-1 flex flex-col items-center gap-0.5 py-2.5 text-[11px]",
-              view === id ? "text-amber" : "text-mute",
+              "rounded-2xl border px-3 py-2 text-[11px] font-medium",
+              live
+                ? "border-mint/30 bg-mint-soft text-mint"
+                : "border-line bg-paper text-mute",
             )}
           >
-            <Icon className="size-4" />
-            {label}
+            {live ? "● Connected to relay" : "○ Preview · sample workspace"}
+          </div>
+          <button
+            type="button"
+            onClick={() => setNav("settings")}
+            className="flex w-full items-center gap-2 rounded-2xl px-3 py-2 text-sm text-mute hover:bg-paper hover:text-ink"
+          >
+            <Settings2 className="size-4" />
+            Settings
           </button>
-        ))}
-      </nav>
+          <div className="flex items-center gap-2 px-2 py-1">
+            <div className="flex size-8 items-center justify-center rounded-full bg-ink text-xs font-bold text-paper">
+              {identity.displayName.slice(0, 1).toUpperCase()}
+            </div>
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold">
+                {identity.displayName}
+              </div>
+              <div className="truncate font-mono text-[10px] text-mute">
+                {shortPubkey(identity.pubkey, 4)}
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      {/* Main */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* Mobile top */}
+        <header className="flex items-center gap-2 border-b border-line bg-paper/80 px-3 py-2.5 backdrop-blur sm:hidden">
+          <div className="flex size-8 items-center justify-center rounded-xl bg-honey">
+            <Zap className="size-3.5" />
+          </div>
+          <span className="font-semibold">Cockpit</span>
+          <button
+            type="button"
+            onClick={() => setSearchOpen(true)}
+            className="ml-auto rounded-xl border border-line p-2"
+          >
+            <Search className="size-4" />
+          </button>
+        </header>
+
+        {!live && (
+          <div className="border-b border-honey/20 bg-honey/10 px-4 py-2 text-center text-sm text-honey-deep">
+            <strong className="font-semibold">Preview</strong>
+            {" — "}
+            sample workspace so you can click around. Connect a Buzz relay in
+            Settings when you’re ready.
+          </div>
+        )}
+
+        <main className="min-h-0 flex-1 overflow-y-auto">
+          {nav === "inbox" && (
+            <InboxView
+              items={inbox}
+              agents={agents}
+              onResolve={resolveInbox}
+              onOpenWork={(workId) => {
+                setNav("work");
+                setSelectedWork(workId);
+              }}
+            />
+          )}
+          {nav === "work" && (
+            <WorkView
+              work={work}
+              agents={agents}
+              selectedId={selectedWork}
+              onSelect={setSelectedWork}
+              onAddNote={(workId, text) => {
+                setWork((prev) =>
+                  prev.map((w) =>
+                    w.id === workId
+                      ? {
+                          ...w,
+                          updates: [
+                            {
+                              id: `n-${Date.now()}`,
+                              author: "You",
+                              isAgent: false,
+                              text,
+                              when: "now",
+                            },
+                            ...w.updates,
+                          ],
+                        }
+                      : w,
+                  ),
+                );
+              }}
+              onCreate={(title) => {
+                const id = `w-${Date.now()}`;
+                setWork((prev) => [
+                  {
+                    id,
+                    title,
+                    goal: "You just created this. Add a note or an agent.",
+                    status: "moving",
+                    people: 1,
+                    agentIds: [],
+                    updates: [
+                      {
+                        id: `n-${Date.now()}`,
+                        author: "You",
+                        isAgent: false,
+                        text: "Opened this work.",
+                        when: "now",
+                      },
+                    ],
+                  },
+                  ...prev,
+                ]);
+                setSelectedWork(id);
+              }}
+            />
+          )}
+          {nav === "agents" && (
+            <AgentsView
+              agents={agents}
+              onStopAll={() =>
+                setAgents((prev) =>
+                  prev.map((a) =>
+                    a.status === "working"
+                      ? {
+                          ...a,
+                          status: "idle",
+                          doing: "Ready for the next task",
+                        }
+                      : a,
+                  ),
+                )
+              }
+            />
+          )}
+          {nav === "messages" && (
+            <MessagesView threads={DEMO_MESSAGES} agents={agents} />
+          )}
+          {nav === "settings" && (
+            <div className="mx-auto max-w-lg px-4 py-10 animate-rise">
+              <h1 className="font-display text-3xl font-medium">Settings</h1>
+              <p className="mt-2 text-mute">
+                Identity and relay. Everything else stays simple on purpose.
+              </p>
+              <form
+                className="mt-8 space-y-4 rounded-3xl border border-line bg-paper p-5 shadow-sm"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  setRelayWsUrl(relayInput.trim());
+                  const next = getOrCreateIdentity(nameInput.trim() || "You");
+                  setIdentity(next);
+                  void connect(next, relayInput.trim()).then(() =>
+                    push("Saved connection settings"),
+                  );
+                }}
+              >
+                <label className="block">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-mute">
+                    Display name
+                  </span>
+                  <input
+                    value={nameInput}
+                    onChange={(e) => setNameInput(e.target.value)}
+                    className="mt-1.5 w-full rounded-2xl border border-line bg-cream px-3 py-2.5 text-sm outline-none focus:border-honey"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-mute">
+                    Relay WebSocket
+                  </span>
+                  <input
+                    value={relayInput}
+                    onChange={(e) => setRelayInput(e.target.value)}
+                    className="mt-1.5 w-full rounded-2xl border border-line bg-cream px-3 py-2.5 font-mono text-sm outline-none focus:border-honey"
+                  />
+                  <span className="mt-1 block text-xs text-mute">
+                    Local: use{" "}
+                    <code className="text-sky">/relay-ws</code> via Vite proxy
+                    or <code className="text-sky">ws://127.0.0.1:3000</code>
+                  </span>
+                </label>
+                <div className="rounded-2xl bg-cream px-3 py-2 font-mono text-[11px] text-mute">
+                  <div>status: {conn}</div>
+                  <div className="break-all">pubkey: {identity.pubkey}</div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="submit"
+                    className="rounded-2xl bg-ink px-4 py-2.5 text-sm font-semibold text-paper"
+                  >
+                    Save & connect
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = resetIdentity(nameInput || "You");
+                      setIdentity(next);
+                      void connect(next, getRelayWsUrl());
+                      push("New keypair created");
+                    }}
+                    className="rounded-2xl border border-line px-4 py-2.5 text-sm text-mute hover:text-coral"
+                  >
+                    New keypair
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+        </main>
+
+        {/* Mobile nav */}
+        <nav className="flex border-t border-line bg-paper sm:hidden">
+          {navItems.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setNav(id)}
+              className={clsx(
+                "relative flex flex-1 flex-col items-center gap-0.5 py-2.5 text-[10px] font-medium",
+                nav === id ? "text-honey-deep" : "text-mute",
+              )}
+            >
+              <Icon className="size-4" />
+              {label}
+              {id === "inbox" && inbox.length > 0 && (
+                <span className="absolute right-1/4 top-1.5 size-1.5 rounded-full bg-honey" />
+              )}
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      {/* Search modal */}
+      {searchOpen && (
+        <div
+          className="fixed inset-0 z-40 flex items-start justify-center bg-ink/30 px-4 pt-[12vh] backdrop-blur-sm"
+          onClick={() => setSearchOpen(false)}
+          onKeyDown={() => {}}
+        >
+          <div
+            className="animate-pop w-full max-w-lg overflow-hidden rounded-3xl border border-line bg-paper shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2 border-b border-line px-4">
+              <Search className="size-4 text-mute" />
+              <input
+                autoFocus
+                value={searchQ}
+                onChange={(e) => setSearchQ(e.target.value)}
+                placeholder="Search work, inbox, agents…"
+                className="w-full bg-transparent py-4 text-sm outline-none"
+              />
+            </div>
+            <ul className="max-h-72 overflow-y-auto p-2">
+              {searchQ && searchHits.length === 0 && (
+                <li className="px-3 py-6 text-center text-sm text-mute">
+                  Nothing matched
+                </li>
+              )}
+              {!searchQ && (
+                <li className="px-3 py-4 text-center text-sm text-mute">
+                  Try “login”, “Honey”, or “release”
+                </li>
+              )}
+              {searchHits.map((h) => (
+                <li key={`${h.type}-${h.title}`}>
+                  <button
+                    type="button"
+                    onClick={h.go}
+                    className="flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left hover:bg-cream"
+                  >
+                    <span className="text-[10px] font-bold uppercase tracking-wide text-mute">
+                      {h.type}
+                    </span>
+                    <span className="font-medium">{h.title}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
