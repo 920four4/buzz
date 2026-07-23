@@ -3,12 +3,13 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Mission-control UX for Buzz — not a Slack clone",
+  "description": "Human-first Buzz client (Inbox / Work / Agents) — not a Slack clone",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc -b --noEmit"
+    "typecheck": "tsc -b --noEmit",
+    "doctor": "cd .. && ./scripts/cockpit/doctor.sh"
   },
   "dependencies": {
     "clsx": "^2.1.1",
