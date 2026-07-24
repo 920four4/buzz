@@ -82,6 +82,10 @@ export class RelaySession {
     return this.url;
   }
 
+  get ownerIdentity() {
+    return this.identity;
+  }
+
   onState(fn: StateListener): () => void {
     this.stateListeners.add(fn);
     fn(this.state);
@@ -362,8 +366,10 @@ export class RelaySession {
     return event;
   }
 
-  async createRoom(name: string, about?: string) {
+  async createRoom(name: string, about?: string, channelId?: string) {
+    const id = channelId ?? crypto.randomUUID();
     const tags: string[][] = [
+      ["h", id],
       ["name", name],
       ["visibility", "open"],
       ["channel_type", "stream"],
@@ -375,14 +381,27 @@ export class RelaySession {
       tags,
     });
     await this.publish(event);
-    return event;
+    return { event, channelId: id };
   }
 
-  async sendMessage(channelId: string, text: string) {
+  async sendMessage(
+    channelId: string,
+    text: string,
+    mentionPubkeys: string[] = [],
+  ) {
+    const tags: string[][] = [
+      ["h", channelId],
+      ["p", this.identity.pubkey],
+    ];
+    for (const pk of mentionPubkeys) {
+      if (pk && pk !== this.identity.pubkey) {
+        tags.push(["p", pk.toLowerCase()]);
+      }
+    }
     const event = signEvent(this.identity, {
       kind: KIND_STREAM_MESSAGE,
       content: text,
-      tags: [["h", channelId]],
+      tags,
     });
     await this.publish(event);
     return event;

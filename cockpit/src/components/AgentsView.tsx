@@ -30,6 +30,7 @@ export function AgentsView({
   teams,
   onStopAll,
   onCreate,
+  onSyncAll,
   onUpdate,
   onDelete,
   onAssignToWork,
@@ -42,6 +43,7 @@ export function AgentsView({
   teams: AgentTeam[];
   onStopAll: () => void;
   onCreate: (input: CreateAgentInput) => void;
+  onSyncAll?: () => void;
   onUpdate: (id: string, patch: Partial<Agent>) => void;
   onDelete: (id: string) => void;
   onAssignToWork: (agentId: string, workId: string) => void;
@@ -77,6 +79,15 @@ export function AgentsView({
           >
             <Plus className="size-3.5" /> New agent
           </button>
+          {onSyncAll && (
+            <button
+              type="button"
+              onClick={onSyncAll}
+              className="inline-flex items-center gap-1.5 rounded-full border border-line bg-paper px-3 py-1.5 text-xs font-semibold text-ink hover:border-honey"
+            >
+              Publish to relay
+            </button>
+          )}
           {running > 0 && (
             <button
               type="button"
@@ -483,6 +494,21 @@ function AgentDetailModal({
         <p className="mt-2 font-mono text-[11px] text-mute">
           model: {agent.model}
         </p>
+        {agent.pubkey && (
+          <p className="mt-1 max-w-full break-all font-mono text-[10px] text-mute">
+            npub-hex: {agent.pubkey.slice(0, 16)}…{agent.pubkey.slice(-8)}
+          </p>
+        )}
+        {agent.relaySyncedAt ? (
+          <p className="mt-1 text-xs font-medium text-mint">
+            On relay · kind:30177
+          </p>
+        ) : (
+          <p className="mt-1 text-xs text-mute">Local only · not published yet</p>
+        )}
+        {agent.relaySyncError && (
+          <p className="mt-1 text-xs text-coral">{agent.relaySyncError}</p>
+        )}
       </div>
 
       {onWork.length > 0 && (

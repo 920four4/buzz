@@ -16,3 +16,7 @@ export const KIND_JOB_RESULT = 43004;
 export const KIND_APPROVAL_REQUEST = 46010;
 export const KIND_AGENT_OBSERVER = 24200;
 export const KIND_SYSTEM_MESSAGE = 40099;
+/** NIP-AP persona definition (owner-published blueprint). */
+export const KIND_PERSONA = 30175;
+/** NIP-AP managed-agent public projection (owner-published; d = agent pubkey). */
+export const KIND_MANAGED_AGENT = 30177;

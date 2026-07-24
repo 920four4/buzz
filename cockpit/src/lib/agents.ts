@@ -1,5 +1,7 @@
+import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import type { Agent, WorkItem, WorkUpdate } from "./demo";
 import { DEMO_AGENTS, DEMO_WORK } from "./demo";
+import { bytesToHex } from "./hex";
 
 const AGENTS_KEY = "cockpit.agents.v2";
 const WORK_KEY = "cockpit.work.v2";
@@ -32,15 +34,28 @@ const PALETTE = [
 export function loadAgents(): Agent[] {
   try {
     const raw = localStorage.getItem(AGENTS_KEY);
-    if (!raw) return structuredClone(DEMO_AGENTS);
+    if (!raw) return ensureKeysOnAgents(structuredClone(DEMO_AGENTS));
     const parsed = JSON.parse(raw) as Agent[];
     if (!Array.isArray(parsed) || parsed.length === 0) {
-      return structuredClone(DEMO_AGENTS);
+      return ensureKeysOnAgents(structuredClone(DEMO_AGENTS));
     }
-    return parsed;
+    return ensureKeysOnAgents(parsed);
   } catch {
-    return structuredClone(DEMO_AGENTS);
+    return ensureKeysOnAgents(structuredClone(DEMO_AGENTS));
   }
+}
+
+/** Mint keypairs for agents that predate Buzz-wire support. */
+function ensureKeysOnAgents(agents: Agent[]): Agent[] {
+  return agents.map((a) => {
+    if (a.pubkey && a.secretKeyHex) return a;
+    const sk = generateSecretKey();
+    return {
+      ...a,
+      secretKeyHex: bytesToHex(sk),
+      pubkey: getPublicKey(sk),
+    };
+  });
 }
 
 export function saveAgents(agents: Agent[]) {
@@ -99,6 +114,10 @@ export function createAgent(
   }
   const color =
     input.color || PALETTE[existing.length % PALETTE.length] || "#5b8fd4";
+  // Always mint a real Nostr keypair so the agent can live on the Buzz wire.
+  const sk = generateSecretKey();
+  const secretKeyHex = bytesToHex(sk);
+  const pubkey = getPublicKey(sk);
   return {
     id,
     name: input.name.trim(),
@@ -109,6 +128,9 @@ export function createAgent(
     status: "idle",
     doing: "Ready for the next task",
     emoji: "🤖",
+    pubkey,
+    secretKeyHex,
+    systemPrompt: input.role.trim() || undefined,
   };
 }
 

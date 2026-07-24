@@ -20,6 +20,8 @@ export type WorkItem = {
   people: number;
   agentIds: string[];
   updates: WorkUpdate[];
+  /** Buzz channel UUID when this work is mirrored to the relay (NIP-29 #h). */
+  channelId?: string;
 };
 
 export type WorkUpdate = {
@@ -40,6 +42,14 @@ export type Agent = {
   status: "idle" | "working" | "waiting" | "offline";
   doing: string;
   emoji: string;
+  /** Nostr secp256k1 pubkey (hex). Real Buzz identity for this agent. */
+  pubkey?: string;
+  /** Agent secret key (hex) — browser-local; never published. */
+  secretKeyHex?: string;
+  systemPrompt?: string;
+  /** Last successful publish of kind:30177 to the connected relay. */
+  relaySyncedAt?: number;
+  relaySyncError?: string | null;
 };
 
 export type MessageThread = {

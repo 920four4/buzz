@@ -35,6 +35,16 @@ import {
   saveWork,
 } from "@/lib/agents";
 import {
+  addAgentToChannel,
+  agentFromManagedEvent,
+  ensureAgentKeys,
+  ensureWorkChannel,
+  fetchManagedAgentsFromRelay,
+  mergeRelayAgents,
+  publishAgentToRelay,
+  publishWorkMessage,
+} from "@/lib/buzzWire";
+import {
   getOrCreateIdentity,
   resetIdentity,
   shortPubkey,
@@ -100,10 +110,23 @@ export default function App() {
         /* optional */
       }
       setLive(true);
+      // Pull owner-published managed agents from the hive (desktop + Cockpit).
+      try {
+        const events = await fetchManagedAgentsFromRelay(next, id.pubkey);
+        const remote = events
+          .map(agentFromManagedEvent)
+          .filter((a): a is Agent => a != null);
+        if (remote.length > 0) {
+          setAgents((local) => mergeRelayAgents(local, remote));
+          push(`Synced ${remote.length} agent(s) from relay`);
+        }
+      } catch {
+        /* offline-ok */
+      }
     } catch {
       setLive(false);
     }
-  }, []);
+  }, [push]);
 
   useEffect(() => {
     void connect(identity, getRelayWsUrl());
@@ -180,40 +203,64 @@ export default function App() {
     setSelectedWork(workId);
   }
 
-  function assignAgentToWork(workId: string, agentId: string) {
+  async function assignAgentToWork(workId: string, agentId: string) {
     const agent = agents.find((a) => a.id === agentId);
     const item = work.find((w) => w.id === workId);
     if (!agent || !item) return;
 
-    setWork((prev) =>
-      prev.map((w) => {
-        if (w.id !== workId) return w;
-        if (w.agentIds.includes(agentId)) return w;
-        return {
-          ...w,
-          agentIds: [...w.agentIds, agentId],
-          status: w.status === "done" ? w.status : "moving",
-          updates: [
-            makeUpdate(
-              "System",
-              `${agent.name} joined this work.`,
-              false,
-            ),
-            ...w.updates,
-          ],
-        };
-      }),
-    );
+    let nextAgent = ensureAgentKeys(agent);
+    let nextWork = item;
+    const session = sessionRef.current;
+
+    if (live && session) {
+      try {
+        nextAgent = await publishAgentToRelay(session, nextAgent);
+        const ensured = await ensureWorkChannel(session, nextWork);
+        nextWork = ensured.work;
+        if (nextAgent.pubkey) {
+          await addAgentToChannel(session, ensured.channelId, nextAgent.pubkey);
+        }
+      } catch (err) {
+        push(
+          err instanceof Error
+            ? `Relay assign failed: ${err.message}`
+            : "Relay assign failed",
+          "info",
+        );
+      }
+    }
+
     setAgents((prev) =>
       prev.map((a) =>
         a.id === agentId
           ? {
-              ...a,
+              ...nextAgent,
               status: "working" as const,
               doing: `On “${item.title}”`,
             }
-          : a,
+          : a.id === nextAgent.id
+            ? nextAgent
+            : a,
       ),
+    );
+
+    setWork((prev) =>
+      prev.map((w) => {
+        if (w.id !== workId) return w;
+        if (w.agentIds.includes(agentId)) {
+          return { ...w, channelId: nextWork.channelId ?? w.channelId };
+        }
+        return {
+          ...w,
+          channelId: nextWork.channelId ?? w.channelId,
+          agentIds: [...w.agentIds, agentId],
+          status: w.status === "done" ? w.status : "moving",
+          updates: [
+            makeUpdate("System", `${agent.name} joined this work.`, false),
+            ...w.updates,
+          ],
+        };
+      }),
     );
   }
 
@@ -255,10 +302,12 @@ export default function App() {
     );
   }
 
-  function handleAddNote(workId: string, text: string) {
+  async function handleAddNote(workId: string, text: string) {
     const mentioned = parseMentions(text, agents);
     const item = work.find((w) => w.id === workId);
+    const session = sessionRef.current;
 
+    // Local optimistic update
     setWork((prev) =>
       prev.map((w) => {
         if (w.id !== workId) return w;
@@ -273,7 +322,55 @@ export default function App() {
       }),
     );
 
-    // Tag agents → they join + reply
+    // Live: ensure channel, publish stream message with p-tags, add members
+    if (live && session && item) {
+      try {
+        let channelWork = item;
+        const ensured = await ensureWorkChannel(session, item);
+        channelWork = ensured.work;
+        setWork((prev) =>
+          prev.map((w) =>
+            w.id === workId
+              ? { ...w, channelId: channelWork.channelId }
+              : w,
+          ),
+        );
+
+        for (const m of mentioned) {
+          const keyed = ensureAgentKeys(m);
+          await publishAgentToRelay(session, keyed);
+          if (keyed.pubkey) {
+            await addAgentToChannel(
+              session,
+              channelWork.channelId!,
+              keyed.pubkey,
+            );
+          }
+          setAgents((prev) =>
+            prev.map((a) => (a.id === m.id ? { ...keyed, ...a, ...keyed } : a)),
+          );
+        }
+
+        const mentionPks = mentioned
+          .map((m) => ensureAgentKeys(m).pubkey)
+          .filter((pk): pk is string => Boolean(pk));
+        await publishWorkMessage(
+          session,
+          channelWork.channelId!,
+          text,
+          mentionPks,
+        );
+      } catch (err) {
+        push(
+          err instanceof Error
+            ? `Published locally; relay: ${err.message}`
+            : "Published locally; relay sync failed",
+          "info",
+        );
+      }
+    }
+
+    // Tag agents → working + local ack (ACP harness answers for real agents)
     if (mentioned.length > 0) {
       setAgents((prev) =>
         prev.map((a) => {
@@ -282,12 +379,13 @@ export default function App() {
           return {
             ...a,
             status: "working" as const,
-            doing: text.replace(/@\w[\w-]*/g, "").trim() || `On “${item?.title ?? "work"}”`,
+            doing:
+              text.replace(/@[\w-]+/g, "").trim() ||
+              `On “${item?.title ?? "work"}”`,
           };
         }),
       );
 
-      // Simulated agent acknowledgements
       window.setTimeout(() => {
         setWork((prev) =>
           prev.map((w) => {
@@ -371,11 +469,62 @@ export default function App() {
     }
   }
 
-  function handleCreateAgent(input: CreateAgentInput) {
-    setAgents((prev) => {
-      const agent = createAgent(input, prev);
-      return [...prev, agent];
-    });
+  async function handleCreateAgent(input: CreateAgentInput) {
+    const agent = createAgent(input, agents);
+    setAgents((prev) => [...prev, agent]);
+
+    const session = sessionRef.current;
+    if (live && session) {
+      try {
+        const synced = await publishAgentToRelay(session, agent);
+        setAgents((prev) =>
+          prev.map((a) => (a.id === agent.id ? synced : a)),
+        );
+        push(`${agent.name} published to relay (kind:30177)`);
+      } catch (err) {
+        setAgents((prev) =>
+          prev.map((a) =>
+            a.id === agent.id
+              ? {
+                  ...a,
+                  relaySyncError:
+                    err instanceof Error ? err.message : "publish failed",
+                }
+              : a,
+          ),
+        );
+        push(
+          err instanceof Error
+            ? `Agent saved locally; relay: ${err.message}`
+            : "Agent saved locally; relay publish failed",
+          "info",
+        );
+      }
+    } else {
+      push(`${agent.name} created (connect relay to publish kind:30177)`);
+    }
+  }
+
+  async function syncAllAgentsToRelay() {
+    const session = sessionRef.current;
+    if (!session || !live) {
+      push("Connect to a relay first", "info");
+      return;
+    }
+    let ok = 0;
+    let fail = 0;
+    for (const agent of agents) {
+      try {
+        const synced = await publishAgentToRelay(session, ensureAgentKeys(agent));
+        setAgents((prev) =>
+          prev.map((a) => (a.id === agent.id ? synced : a)),
+        );
+        ok++;
+      } catch {
+        fail++;
+      }
+    }
+    push(`Synced ${ok} agent(s)${fail ? ` · ${fail} failed` : ""}`);
   }
 
   return (
@@ -511,10 +660,12 @@ export default function App() {
               agents={agents}
               selectedId={selectedWork}
               onSelect={setSelectedWork}
-              onAddNote={handleAddNote}
-              onAssignAgent={(workId, agentId) =>
-                assignAgentToWork(workId, agentId)
-              }
+              onAddNote={(workId, text) => {
+                void handleAddNote(workId, text);
+              }}
+              onAssignAgent={(workId, agentId) => {
+                void assignAgentToWork(workId, agentId);
+              }}
               onRemoveAgent={removeAgentFromWork}
               onCreate={(title) => {
                 const id = `w-${Date.now()}`;
@@ -554,7 +705,12 @@ export default function App() {
                   ),
                 )
               }
-              onCreate={handleCreateAgent}
+              onCreate={(input) => {
+                void handleCreateAgent(input);
+              }}
+              onSyncAll={() => {
+                void syncAllAgentsToRelay();
+              }}
               onUpdate={(id, patch) =>
                 setAgents((prev) =>
                   prev.map((a) => (a.id === id ? { ...a, ...patch } : a)),
@@ -575,9 +731,9 @@ export default function App() {
                   })),
                 );
               }}
-              onAssignToWork={(agentId, workId) =>
-                assignAgentToWork(workId, agentId)
-              }
+              onAssignToWork={(agentId, workId) => {
+                void assignAgentToWork(workId, agentId);
+              }}
               onCreateTeam={(name, agentIds) =>
                 setTeams((prev) => [
                   {
@@ -685,13 +841,29 @@ export default function App() {
                   </button>
                 </div>
               </form>
-              <p className="mt-6 text-sm text-mute leading-relaxed">
-                <strong className="text-ink">Agents in Cockpit</strong> are fully
-                managed here (create, edit, teams, @mentions). When a live relay
-                is connected, notes can sync as stream events; managed agent
-                processes still run via the Buzz desktop/ACP harness on that
-                same hive.
-              </p>
+              <div className="mt-6 space-y-3 text-sm text-mute leading-relaxed">
+                <p>
+                  <strong className="text-ink">Buzz wire (live)</strong> — create
+                  agent publishes{" "}
+                  <code className="text-sky">kind:30177</code> (owner) +{" "}
+                  <code className="text-sky">kind:0</code> (agent profile). Work
+                  becomes a NIP-29 channel; agents join as bot; @mentions send{" "}
+                  <code className="text-sky">kind:9</code> with p-tags.
+                </p>
+                <p>
+                  <strong className="text-ink">Execution</strong> — LLM/ACP still
+                  runs via Buzz desktop / <code className="text-sky">buzz-acp</code>{" "}
+                  on this hive. Cockpit owns roster, rooms, and mentions on the
+                  wire.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void syncAllAgentsToRelay()}
+                  className="rounded-2xl border border-line bg-paper px-4 py-2 text-sm font-semibold text-ink hover:border-honey"
+                >
+                  Publish all agents to relay
+                </button>
+              </div>
             </div>
           )}
         </main>
