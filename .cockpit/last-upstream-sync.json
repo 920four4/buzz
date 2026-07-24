@@ -1,0 +1,7 @@
+{
+  "synced_at": "2026-07-23T22:00:00Z",
+  "upstream_ref": "upstream/main",
+  "upstream_sha": "bootstrap",
+  "head_sha": "see-git",
+  "note": "Initial dual-track setup. Run just cockpit-sync to merge block/buzz and refresh this file."
+}

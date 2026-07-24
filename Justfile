@@ -963,3 +963,41 @@ benchmark *ARGS:
 # Stop the benchmark Docker stack (state and channels are kept)
 benchmark-down:
     docker compose --project-name buzz-benchmark down
+
+# ─── Cockpit (custom UX · dual-track with upstream Buzz) ─────────────────────
+# See COCKPIT.md — cockpit/ is your product UI; crates/relay track block/buzz.
+
+# Wire remotes (origin=920four4/buzz, upstream=block/buzz) + author team@920four.com
+cockpit-setup-git:
+    ./scripts/cockpit/setup-git.sh
+
+# Health check: remotes, docker, relay, UI, upstream skew
+cockpit-doctor:
+    ./scripts/cockpit/doctor.sh
+
+# Full stack: docker + migrate + relay + Cockpit UI (foreground)
+cockpit-up:
+    ./scripts/cockpit/up.sh
+
+# Background full stack (relay + UI logs under .cockpit/)
+cockpit-up-bg:
+    ./scripts/cockpit/up.sh --bg
+
+# Cockpit UI only (expects relay on :3000)
+cockpit:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    pnpm --dir cockpit dev --host 127.0.0.1 --port 5174
+
+# Merge block/buzz; never replace cockpit/ UX
+cockpit-sync *ARGS:
+    ./scripts/cockpit/sync-upstream.sh {{ARGS}}
+
+# Production deploy to Vercel team 920four4s-projects
+cockpit-deploy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    cd cockpit
+    vercel --prod --yes --scope 920four4s-projects
