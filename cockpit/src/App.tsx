@@ -14,7 +14,6 @@ import { InboxView } from "@/components/InboxView";
 import { MessagesView } from "@/components/MessagesView";
 import { WorkView } from "@/components/WorkView";
 import {
-  DEMO_INBOX,
   DEMO_MESSAGES,
   type Agent,
   type InboxItem,
@@ -23,7 +22,6 @@ import {
 import {
   type AgentTeam,
   type CreateAgentInput,
-  agentReplyForTask,
   createAgent,
   loadAgents,
   loadTeams,
@@ -34,6 +32,8 @@ import {
   saveTeams,
   saveWork,
 } from "@/lib/agents";
+import { runAgentJob } from "@/lib/agentRuntime";
+import { connectionLabel } from "@/lib/activity";
 import {
   addAgentToChannel,
   agentFromManagedEvent,
@@ -72,19 +72,25 @@ export default function App() {
   const [identity, setIdentity] = useState<Identity>(() =>
     getOrCreateIdentity("You"),
   );
-  const [nav, setNav] = useState<Nav>("inbox");
-  const [inbox, setInbox] = useState<InboxItem[]>(DEMO_INBOX);
+  const [nav, setNav] = useState<Nav>("work");
+  const [inbox, setInbox] = useState<InboxItem[]>([]);
   const [work, setWork] = useState<WorkItem[]>(() => loadWork());
   const [agents, setAgents] = useState<Agent[]>(() => loadAgents());
   const [teams, setTeams] = useState<AgentTeam[]>(() => loadTeams());
   const [selectedWork, setSelectedWork] = useState<string | null>(null);
   const [conn, setConn] = useState<ConnectionState>("idle");
   const [live, setLive] = useState(false);
+  const [busyWorkId, setBusyWorkId] = useState<string | null>(null);
+  const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [relayInput, setRelayInput] = useState(getRelayWsUrl());
   const [nameInput, setNameInput] = useState(identity.displayName);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQ, setSearchQ] = useState("");
   const sessionRef = useRef<RelaySession | null>(null);
+  const jobCancelRef = useRef<Map<string, () => void>>(new Map());
+  // Keep latest work for job callbacks without stale closures
+  const workRef = useRef(work);
+  workRef.current = work;
 
   // Persist workspace state
   useEffect(() => {
@@ -203,65 +209,155 @@ export default function App() {
     setSelectedWork(workId);
   }
 
+  function appendWorkUpdate(
+    workId: string,
+    update: ReturnType<typeof makeUpdate>,
+  ) {
+    setWork((prev) =>
+      prev.map((w) =>
+        w.id === workId ? { ...w, updates: [update, ...w.updates] } : w,
+      ),
+    );
+  }
+
+  function startAgentJob(agent: Agent, item: WorkItem, task: string) {
+    // Cancel prior job for this agent on this work
+    const key = `${item.id}:${agent.id}`;
+    jobCancelRef.current.get(key)?.();
+
+    const { cancel } = runAgentJob(agent, item, task, {
+      onUpdate: (workId, update) => appendWorkUpdate(workId, update),
+      onAgentStatus: (agentId, status, doing) => {
+        setAgents((prev) =>
+          prev.map((a) => (a.id === agentId ? { ...a, status, doing } : a)),
+        );
+      },
+      onJobDone: (job, needsHuman) => {
+        jobCancelRef.current.delete(key);
+        if (!needsHuman) return;
+        const ag = agents.find((a) => a.id === job.agentId);
+        const w = workRef.current.find((x) => x.id === job.workId);
+        if (!ag || !w) return;
+        setInbox((prev) => [
+          {
+            id: `inbox-${job.id}`,
+            kind: "approve" as const,
+            title: `${ag.name} finished — review`,
+            body: job.artifact
+              ? job.artifact.slice(0, 180) + (job.artifact.length > 180 ? "…" : "")
+              : `Job on “${w.title}” is done.`,
+            workId: w.id,
+            workTitle: w.title,
+            agentId: ag.id,
+            when: "just now",
+            urgency: "now" as const,
+          },
+          ...prev.filter((i) => i.id !== `inbox-${job.id}`),
+        ]);
+        push(`${ag.name} needs a quick review`);
+      },
+      onRelayNote: async (workId, text) => {
+        const session = sessionRef.current;
+        const w = workRef.current.find((x) => x.id === workId);
+        if (!live || !session || !w?.channelId) return;
+        try {
+          await publishWorkMessage(session, w.channelId, text, []);
+        } catch {
+          /* local timeline already has it */
+        }
+      },
+    });
+    jobCancelRef.current.set(key, cancel);
+  }
+
   async function assignAgentToWork(workId: string, agentId: string) {
     const agent = agents.find((a) => a.id === agentId);
     const item = work.find((w) => w.id === workId);
     if (!agent || !item) return;
 
+    setBusyWorkId(workId);
+    setBusyLabel(`Assigning ${agent.name}…`);
     let nextAgent = ensureAgentKeys(agent);
     let nextWork = item;
     const session = sessionRef.current;
 
-    if (live && session) {
-      try {
+    try {
+      if (live && session) {
+        setBusyLabel(`Publishing ${agent.name} to hive…`);
         nextAgent = await publishAgentToRelay(session, nextAgent);
+        setBusyLabel("Opening work room on relay…");
         const ensured = await ensureWorkChannel(session, nextWork);
         nextWork = ensured.work;
         if (nextAgent.pubkey) {
-          await addAgentToChannel(session, ensured.channelId, nextAgent.pubkey);
+          setBusyLabel(`Adding ${agent.name} to room…`);
+          await addAgentToChannel(
+            session,
+            ensured.channelId,
+            nextAgent.pubkey,
+          );
         }
-      } catch (err) {
-        push(
-          err instanceof Error
-            ? `Relay assign failed: ${err.message}`
-            : "Relay assign failed",
-          "info",
-        );
       }
-    }
 
-    setAgents((prev) =>
-      prev.map((a) =>
-        a.id === agentId
-          ? {
-              ...nextAgent,
-              status: "working" as const,
-              doing: `On “${item.title}”`,
-            }
-          : a.id === nextAgent.id
-            ? nextAgent
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.id === agentId
+            ? {
+                ...nextAgent,
+                status: "working" as const,
+                doing: `Joining “${item.title}”`,
+              }
             : a,
-      ),
-    );
+        ),
+      );
 
-    setWork((prev) =>
-      prev.map((w) => {
-        if (w.id !== workId) return w;
-        if (w.agentIds.includes(agentId)) {
-          return { ...w, channelId: nextWork.channelId ?? w.channelId };
-        }
-        return {
-          ...w,
-          channelId: nextWork.channelId ?? w.channelId,
-          agentIds: [...w.agentIds, agentId],
-          status: w.status === "done" ? w.status : "moving",
-          updates: [
-            makeUpdate("System", `${agent.name} joined this work.`, false),
-            ...w.updates,
-          ],
-        };
-      }),
-    );
+      const joined = !item.agentIds.includes(agentId);
+      setWork((prev) =>
+        prev.map((w) => {
+          if (w.id !== workId) return w;
+          return {
+            ...w,
+            channelId: nextWork.channelId ?? w.channelId,
+            agentIds: joined ? [...w.agentIds, agentId] : w.agentIds,
+            status: w.status === "done" ? w.status : "moving",
+            updates: joined
+              ? [
+                  makeUpdate(
+                    "Cockpit",
+                    `${agent.name} is on this work.`,
+                    false,
+                  ),
+                  ...w.updates,
+                ]
+              : w.updates,
+          };
+        }),
+      );
+
+      // Always run a real multi-step job so assign feels productive
+      const freshWork = {
+        ...item,
+        channelId: nextWork.channelId ?? item.channelId,
+        agentIds: joined ? [...item.agentIds, agentId] : item.agentIds,
+      };
+      startAgentJob(
+        nextAgent,
+        freshWork,
+        `Help move “${item.title}” forward. Goal: ${item.goal}`,
+      );
+      push(
+        live
+          ? `${agent.name} assigned · working on the hive`
+          : `${agent.name} assigned · working now`,
+      );
+    } catch (err) {
+      push(
+        err instanceof Error ? err.message : "Could not assign agent",
+        "info",
+      );
+    } finally {
+      setBusyWorkId(null);
+      setBusyLabel(null);
+    }
   }
 
   function removeAgentFromWork(workId: string, agentId: string) {
@@ -305,9 +401,14 @@ export default function App() {
   async function handleAddNote(workId: string, text: string) {
     const mentioned = parseMentions(text, agents);
     const item = work.find((w) => w.id === workId);
+    if (!item) return;
     const session = sessionRef.current;
 
-    // Local optimistic update
+    setBusyWorkId(workId);
+    setBusyLabel(live ? "Sending…" : "Posting…");
+
+    // Your note first
+    const youNote = makeUpdate("You", text, false);
     setWork((prev) =>
       prev.map((w) => {
         if (w.id !== workId) return w;
@@ -317,86 +418,76 @@ export default function App() {
           ...w,
           agentIds: [...agentIds],
           status: w.status === "done" ? w.status : "moving",
-          updates: [makeUpdate("You", text, false), ...w.updates],
+          updates: [youNote, ...w.updates],
         };
       }),
     );
 
-    // Live: ensure channel, publish stream message with p-tags, add members
-    if (live && session && item) {
-      try {
-        let channelWork = item;
+    let channelId = item.channelId;
+    try {
+      if (live && session) {
         const ensured = await ensureWorkChannel(session, item);
-        channelWork = ensured.work;
+        channelId = ensured.channelId;
         setWork((prev) =>
           prev.map((w) =>
-            w.id === workId
-              ? { ...w, channelId: channelWork.channelId }
-              : w,
+            w.id === workId ? { ...w, channelId } : w,
           ),
         );
 
         for (const m of mentioned) {
           const keyed = ensureAgentKeys(m);
+          setBusyLabel(`Getting ${m.name} on the hive…`);
           await publishAgentToRelay(session, keyed);
-          if (keyed.pubkey) {
-            await addAgentToChannel(
-              session,
-              channelWork.channelId!,
-              keyed.pubkey,
-            );
+          if (keyed.pubkey && channelId) {
+            await addAgentToChannel(session, channelId, keyed.pubkey);
           }
           setAgents((prev) =>
-            prev.map((a) => (a.id === m.id ? { ...keyed, ...a, ...keyed } : a)),
+            prev.map((a) =>
+              a.id === m.id ? { ...a, ...keyed, relaySyncedAt: Date.now() } : a,
+            ),
           );
         }
 
+        setBusyLabel("Sending to room…");
         const mentionPks = mentioned
           .map((m) => ensureAgentKeys(m).pubkey)
           .filter((pk): pk is string => Boolean(pk));
-        await publishWorkMessage(
-          session,
-          channelWork.channelId!,
-          text,
-          mentionPks,
-        );
-      } catch (err) {
+        await publishWorkMessage(session, channelId!, text, mentionPks);
+      }
+
+      // Mentioned agents: join + run real multi-step jobs
+      const taskBody =
+        text.replace(/@[\w-]+/g, "").trim() ||
+        `Help with “${item.title}”`;
+
+      for (const m of mentioned) {
+        const keyed = ensureAgentKeys(m);
+        const joinedWork: WorkItem = {
+          ...item,
+          channelId,
+          agentIds: item.agentIds.includes(m.id)
+            ? item.agentIds
+            : [...item.agentIds, m.id],
+          updates: [youNote, ...item.updates],
+        };
+        startAgentJob(keyed, joinedWork, taskBody);
+      }
+
+      if (mentioned.length === 0) {
+        push(live ? "Sent to room" : "Posted");
+      } else {
         push(
-          err instanceof Error
-            ? `Published locally; relay: ${err.message}`
-            : "Published locally; relay sync failed",
-          "info",
+          `${mentioned.map((m) => m.name).join(", ")} on it`,
         );
       }
-    }
-
-    // Tag agents → working + local ack (ACP harness answers for real agents)
-    if (mentioned.length > 0) {
-      setAgents((prev) =>
-        prev.map((a) => {
-          const hit = mentioned.find((m) => m.id === a.id);
-          if (!hit) return a;
-          return {
-            ...a,
-            status: "working" as const,
-            doing:
-              text.replace(/@[\w-]+/g, "").trim() ||
-              `On “${item?.title ?? "work"}”`,
-          };
-        }),
+    } catch (err) {
+      push(
+        err instanceof Error ? err.message : "Send failed",
+        "info",
       );
-
-      window.setTimeout(() => {
-        setWork((prev) =>
-          prev.map((w) => {
-            if (w.id !== workId) return w;
-            const replies = mentioned.map((m) =>
-              makeUpdate(m.name, agentReplyForTask(m, text), true),
-            );
-            return { ...w, updates: [...replies, ...w.updates] };
-          }),
-        );
-      }, 650);
+    } finally {
+      setBusyWorkId(null);
+      setBusyLabel(null);
     }
   }
 
@@ -636,14 +727,31 @@ export default function App() {
           </button>
         </header>
 
-        {!live && (
-          <div className="border-b border-honey/20 bg-honey/10 px-4 py-2 text-center text-sm text-honey-deep">
-            <strong className="font-semibold">Local workspace</strong>
-            {" — "}
-            create agents, @tag them on work. Connect a Buzz relay in Settings
-            for live hive sync.
-          </div>
-        )}
+        {(() => {
+          const c = connectionLabel(live, conn);
+          return (
+            <div
+              className={clsx(
+                "border-b px-4 py-2 text-center text-sm",
+                c.tone === "ok" && "border-mint/20 bg-mint-soft text-mint",
+                c.tone === "warn" &&
+                  "border-honey/20 bg-honey/10 text-honey-deep",
+                c.tone === "mute" && "border-line bg-paper text-mute",
+              )}
+            >
+              {c.text}
+              {!live && (
+                <button
+                  type="button"
+                  className="ml-2 font-semibold underline"
+                  onClick={() => setNav("settings")}
+                >
+                  Connect relay
+                </button>
+              )}
+            </div>
+          );
+        })()}
 
         <main className="min-h-0 flex-1 overflow-y-auto">
           {nav === "inbox" && (
@@ -659,6 +767,9 @@ export default function App() {
               work={work}
               agents={agents}
               selectedId={selectedWork}
+              busyWorkId={busyWorkId}
+              busyLabel={busyLabel}
+              live={live}
               onSelect={setSelectedWork}
               onAddNote={(workId, text) => {
                 void handleAddNote(workId, text);
@@ -673,12 +784,16 @@ export default function App() {
                   {
                     id,
                     title,
-                    goal: "You just created this. Add agents or @mention them.",
+                    goal: "Add agents with + or @mention them in a note with a clear task.",
                     status: "moving",
                     people: 1,
                     agentIds: [],
                     updates: [
-                      makeUpdate("You", "Opened this work.", false),
+                      makeUpdate(
+                        "You",
+                        "Opened this work. Assign an agent or @tag them with a task.",
+                        false,
+                      ),
                     ],
                   },
                   ...prev,
@@ -832,8 +947,8 @@ export default function App() {
                       setAgents(loadAgents());
                       setWork(loadWork());
                       setTeams(loadTeams());
-                      setInbox(DEMO_INBOX);
-                      push("Workspace reset to demo defaults");
+                      setInbox([]);
+                      push("Workspace data cleared");
                     }}
                     className="rounded-2xl border border-line px-4 py-2.5 text-sm text-mute hover:text-ink"
                   >
