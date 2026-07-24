@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
   Inbox,
@@ -14,14 +14,26 @@ import { InboxView } from "@/components/InboxView";
 import { MessagesView } from "@/components/MessagesView";
 import { WorkView } from "@/components/WorkView";
 import {
-  DEMO_AGENTS,
   DEMO_INBOX,
   DEMO_MESSAGES,
-  DEMO_WORK,
   type Agent,
   type InboxItem,
   type WorkItem,
 } from "@/lib/demo";
+import {
+  type AgentTeam,
+  type CreateAgentInput,
+  agentReplyForTask,
+  createAgent,
+  loadAgents,
+  loadTeams,
+  loadWork,
+  makeUpdate,
+  parseMentions,
+  saveAgents,
+  saveTeams,
+  saveWork,
+} from "@/lib/agents";
 import {
   getOrCreateIdentity,
   resetIdentity,
@@ -52,8 +64,9 @@ export default function App() {
   );
   const [nav, setNav] = useState<Nav>("inbox");
   const [inbox, setInbox] = useState<InboxItem[]>(DEMO_INBOX);
-  const [work, setWork] = useState<WorkItem[]>(DEMO_WORK);
-  const [agents, setAgents] = useState<Agent[]>(DEMO_AGENTS);
+  const [work, setWork] = useState<WorkItem[]>(() => loadWork());
+  const [agents, setAgents] = useState<Agent[]>(() => loadAgents());
+  const [teams, setTeams] = useState<AgentTeam[]>(() => loadTeams());
   const [selectedWork, setSelectedWork] = useState<string | null>(null);
   const [conn, setConn] = useState<ConnectionState>("idle");
   const [live, setLive] = useState(false);
@@ -61,28 +74,36 @@ export default function App() {
   const [nameInput, setNameInput] = useState(identity.displayName);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQ, setSearchQ] = useState("");
-  const [session, setSession] = useState<RelaySession | null>(null);
+  const sessionRef = useRef<RelaySession | null>(null);
 
-  const connect = useCallback(
-    async (id: Identity, url: string) => {
-      session?.disconnect();
-      const next = new RelaySession(id, url);
-      setSession(next);
-      next.onState((s) => setConn(s));
+  // Persist workspace state
+  useEffect(() => {
+    saveAgents(agents);
+  }, [agents]);
+  useEffect(() => {
+    saveWork(work);
+  }, [work]);
+  useEffect(() => {
+    saveTeams(teams);
+  }, [teams]);
+
+  const connect = useCallback(async (id: Identity, url: string) => {
+    sessionRef.current?.disconnect();
+    const next = new RelaySession(id, url);
+    sessionRef.current = next;
+    next.onState((s) => setConn(s));
+    try {
+      await next.connect();
       try {
-        await next.connect();
-        try {
-          await next.publishProfile(id.displayName || "You");
-        } catch {
-          /* optional */
-        }
-        setLive(true);
+        await next.publishProfile(id.displayName || "You");
       } catch {
-        setLive(false);
+        /* optional */
       }
-    },
-    [session],
-  );
+      setLive(true);
+    } catch {
+      setLive(false);
+    }
+  }, []);
 
   useEffect(() => {
     void connect(identity, getRelayWsUrl());
@@ -106,7 +127,10 @@ export default function App() {
     if (!q) return [];
     const hits: { type: string; title: string; go: () => void }[] = [];
     for (const i of inbox) {
-      if (i.title.toLowerCase().includes(q) || i.body.toLowerCase().includes(q)) {
+      if (
+        i.title.toLowerCase().includes(q) ||
+        i.body.toLowerCase().includes(q)
+      ) {
         hits.push({
           type: "Inbox",
           title: i.title,
@@ -134,7 +158,10 @@ export default function App() {
       }
     }
     for (const a of agents) {
-      if (a.name.toLowerCase().includes(q) || a.role.toLowerCase().includes(q)) {
+      if (
+        a.name.toLowerCase().includes(q) ||
+        a.role.toLowerCase().includes(q)
+      ) {
         hits.push({
           type: "Agent",
           title: a.name,
@@ -148,10 +175,139 @@ export default function App() {
     return hits.slice(0, 8);
   }, [searchQ, inbox, work, agents]);
 
+  function openWork(workId: string) {
+    setNav("work");
+    setSelectedWork(workId);
+  }
+
+  function assignAgentToWork(workId: string, agentId: string) {
+    const agent = agents.find((a) => a.id === agentId);
+    const item = work.find((w) => w.id === workId);
+    if (!agent || !item) return;
+
+    setWork((prev) =>
+      prev.map((w) => {
+        if (w.id !== workId) return w;
+        if (w.agentIds.includes(agentId)) return w;
+        return {
+          ...w,
+          agentIds: [...w.agentIds, agentId],
+          status: w.status === "done" ? w.status : "moving",
+          updates: [
+            makeUpdate(
+              "System",
+              `${agent.name} joined this work.`,
+              false,
+            ),
+            ...w.updates,
+          ],
+        };
+      }),
+    );
+    setAgents((prev) =>
+      prev.map((a) =>
+        a.id === agentId
+          ? {
+              ...a,
+              status: "working" as const,
+              doing: `On “${item.title}”`,
+            }
+          : a,
+      ),
+    );
+  }
+
+  function removeAgentFromWork(workId: string, agentId: string) {
+    const agent = agents.find((a) => a.id === agentId);
+    setWork((prev) =>
+      prev.map((w) =>
+        w.id === workId
+          ? {
+              ...w,
+              agentIds: w.agentIds.filter((id) => id !== agentId),
+              updates: agent
+                ? [
+                    makeUpdate(
+                      "System",
+                      `${agent.name} left this work.`,
+                      false,
+                    ),
+                    ...w.updates,
+                  ]
+                : w.updates,
+            }
+          : w,
+      ),
+    );
+    setAgents((prev) =>
+      prev.map((a) => {
+        if (a.id !== agentId) return a;
+        const stillOn = work.some(
+          (w) => w.id !== workId && w.agentIds.includes(agentId),
+        );
+        if (stillOn) return a;
+        return {
+          ...a,
+          status: "idle" as const,
+          doing: "Ready for the next task",
+        };
+      }),
+    );
+  }
+
+  function handleAddNote(workId: string, text: string) {
+    const mentioned = parseMentions(text, agents);
+    const item = work.find((w) => w.id === workId);
+
+    setWork((prev) =>
+      prev.map((w) => {
+        if (w.id !== workId) return w;
+        const agentIds = new Set(w.agentIds);
+        for (const m of mentioned) agentIds.add(m.id);
+        return {
+          ...w,
+          agentIds: [...agentIds],
+          status: w.status === "done" ? w.status : "moving",
+          updates: [makeUpdate("You", text, false), ...w.updates],
+        };
+      }),
+    );
+
+    // Tag agents → they join + reply
+    if (mentioned.length > 0) {
+      setAgents((prev) =>
+        prev.map((a) => {
+          const hit = mentioned.find((m) => m.id === a.id);
+          if (!hit) return a;
+          return {
+            ...a,
+            status: "working" as const,
+            doing: text.replace(/@\w[\w-]*/g, "").trim() || `On “${item?.title ?? "work"}”`,
+          };
+        }),
+      );
+
+      // Simulated agent acknowledgements
+      window.setTimeout(() => {
+        setWork((prev) =>
+          prev.map((w) => {
+            if (w.id !== workId) return w;
+            const replies = mentioned.map((m) =>
+              makeUpdate(m.name, agentReplyForTask(m, text), true),
+            );
+            return { ...w, updates: [...replies, ...w.updates] };
+          }),
+        );
+      }, 650);
+    }
+  }
+
   function resolveInbox(id: string) {
-    setInbox((prev) => prev.filter((i) => i.id !== id));
     const item = inbox.find((i) => i.id === id);
-    if (item?.kind === "approve") {
+    setInbox((prev) => prev.filter((i) => i.id !== id));
+    if (!item) return;
+
+    if (item.kind === "approve") {
       setWork((prev) =>
         prev.map((w) =>
           w.id === item.workId
@@ -159,28 +315,30 @@ export default function App() {
                 ...w,
                 status: "done" as const,
                 updates: [
-                  {
-                    id: `u-${Date.now()}`,
-                    author: "You",
-                    isAgent: false,
-                    text: "Approved. Ship it.",
-                    when: "now",
-                  },
+                  makeUpdate("You", "Approved. Ship it.", false),
                   ...w.updates,
                 ],
               }
             : w,
         ),
       );
-      setAgents((prev) =>
-        prev.map((a) =>
-          a.id === "bumble"
-            ? { ...a, status: "idle" as const, doing: "Ready for the next task" }
-            : a,
-        ),
-      );
+      if (item.agentId) {
+        setAgents((prev) =>
+          prev.map((a) =>
+            a.id === item.agentId
+              ? {
+                  ...a,
+                  status: "idle" as const,
+                  doing: "Ready for the next task",
+                }
+              : a,
+          ),
+        );
+      }
     }
-    if (item?.kind === "unblock") {
+    if (item.kind === "unblock" && item.agentId) {
+      const agentName =
+        agents.find((a) => a.id === item.agentId)?.name ?? "Agent";
       setWork((prev) =>
         prev.map((w) =>
           w.id === item.workId
@@ -188,13 +346,11 @@ export default function App() {
                 ...w,
                 status: "moving" as const,
                 updates: [
-                  {
-                    id: `u-${Date.now()}`,
-                    author: "Honey",
-                    isAgent: true,
-                    text: "Thanks — opening the patch now.",
-                    when: "now",
-                  },
+                  makeUpdate(
+                    agentName,
+                    "Thanks — unblocked and continuing.",
+                    true,
+                  ),
                   ...w.updates,
                 ],
               }
@@ -203,11 +359,11 @@ export default function App() {
       );
       setAgents((prev) =>
         prev.map((a) =>
-          a.id === "honey"
+          a.id === item.agentId
             ? {
                 ...a,
                 status: "working" as const,
-                doing: "Opening patch for login bug…",
+                doing: `On “${item.workTitle}”`,
               }
             : a,
         ),
@@ -215,9 +371,15 @@ export default function App() {
     }
   }
 
+  function handleCreateAgent(input: CreateAgentInput) {
+    setAgents((prev) => {
+      const agent = createAgent(input, prev);
+      return [...prev, agent];
+    });
+  }
+
   return (
     <div className="flex h-full min-h-0 bg-cream grain">
-      {/* Sidebar */}
       <aside className="hidden w-[220px] shrink-0 flex-col border-r border-line bg-sidebar/90 px-3 py-4 sm:flex">
         <div className="mb-6 flex items-center gap-2.5 px-2">
           <div className="flex size-9 items-center justify-center rounded-2xl bg-honey text-ink shadow-sm">
@@ -266,6 +428,11 @@ export default function App() {
                   {inbox.length}
                 </span>
               )}
+              {id === "agents" && (
+                <span className="ml-auto text-[10px] font-mono text-mute">
+                  {agents.length}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -279,7 +446,7 @@ export default function App() {
                 : "border-line bg-paper text-mute",
             )}
           >
-            {live ? "● Connected to relay" : "○ Preview · sample workspace"}
+            {live ? "● Connected to relay" : "○ Preview · local workspace"}
           </div>
           <button
             type="button"
@@ -305,9 +472,7 @@ export default function App() {
         </div>
       </aside>
 
-      {/* Main */}
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Mobile top */}
         <header className="flex items-center gap-2 border-b border-line bg-paper/80 px-3 py-2.5 backdrop-blur sm:hidden">
           <div className="flex size-8 items-center justify-center rounded-xl bg-honey">
             <Zap className="size-3.5" />
@@ -324,10 +489,10 @@ export default function App() {
 
         {!live && (
           <div className="border-b border-honey/20 bg-honey/10 px-4 py-2 text-center text-sm text-honey-deep">
-            <strong className="font-semibold">Preview</strong>
+            <strong className="font-semibold">Local workspace</strong>
             {" — "}
-            sample workspace so you can click around. Connect a Buzz relay in
-            Settings when you’re ready.
+            create agents, @tag them on work. Connect a Buzz relay in Settings
+            for live hive sync.
           </div>
         )}
 
@@ -337,10 +502,7 @@ export default function App() {
               items={inbox}
               agents={agents}
               onResolve={resolveInbox}
-              onOpenWork={(workId) => {
-                setNav("work");
-                setSelectedWork(workId);
-              }}
+              onOpenWork={openWork}
             />
           )}
           {nav === "work" && (
@@ -349,45 +511,23 @@ export default function App() {
               agents={agents}
               selectedId={selectedWork}
               onSelect={setSelectedWork}
-              onAddNote={(workId, text) => {
-                setWork((prev) =>
-                  prev.map((w) =>
-                    w.id === workId
-                      ? {
-                          ...w,
-                          updates: [
-                            {
-                              id: `n-${Date.now()}`,
-                              author: "You",
-                              isAgent: false,
-                              text,
-                              when: "now",
-                            },
-                            ...w.updates,
-                          ],
-                        }
-                      : w,
-                  ),
-                );
-              }}
+              onAddNote={handleAddNote}
+              onAssignAgent={(workId, agentId) =>
+                assignAgentToWork(workId, agentId)
+              }
+              onRemoveAgent={removeAgentFromWork}
               onCreate={(title) => {
                 const id = `w-${Date.now()}`;
                 setWork((prev) => [
                   {
                     id,
                     title,
-                    goal: "You just created this. Add a note or an agent.",
+                    goal: "You just created this. Add agents or @mention them.",
                     status: "moving",
                     people: 1,
                     agentIds: [],
                     updates: [
-                      {
-                        id: `n-${Date.now()}`,
-                        author: "You",
-                        isAgent: false,
-                        text: "Opened this work.",
-                        when: "now",
-                      },
+                      makeUpdate("You", "Opened this work.", false),
                     ],
                   },
                   ...prev,
@@ -399,6 +539,8 @@ export default function App() {
           {nav === "agents" && (
             <AgentsView
               agents={agents}
+              work={work}
+              teams={teams}
               onStopAll={() =>
                 setAgents((prev) =>
                   prev.map((a) =>
@@ -412,6 +554,44 @@ export default function App() {
                   ),
                 )
               }
+              onCreate={handleCreateAgent}
+              onUpdate={(id, patch) =>
+                setAgents((prev) =>
+                  prev.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+                )
+              }
+              onDelete={(id) => {
+                setAgents((prev) => prev.filter((a) => a.id !== id));
+                setWork((prev) =>
+                  prev.map((w) => ({
+                    ...w,
+                    agentIds: w.agentIds.filter((x) => x !== id),
+                  })),
+                );
+                setTeams((prev) =>
+                  prev.map((t) => ({
+                    ...t,
+                    agentIds: t.agentIds.filter((x) => x !== id),
+                  })),
+                );
+              }}
+              onAssignToWork={(agentId, workId) =>
+                assignAgentToWork(workId, agentId)
+              }
+              onCreateTeam={(name, agentIds) =>
+                setTeams((prev) => [
+                  {
+                    id: `team-${Date.now()}`,
+                    name,
+                    agentIds,
+                  },
+                  ...prev,
+                ])
+              }
+              onDeleteTeam={(id) =>
+                setTeams((prev) => prev.filter((t) => t.id !== id))
+              }
+              onOpenWork={openWork}
             />
           )}
           {nav === "messages" && (
@@ -421,7 +601,7 @@ export default function App() {
             <div className="mx-auto max-w-lg px-4 py-10 animate-rise">
               <h1 className="font-display text-3xl font-medium">Settings</h1>
               <p className="mt-2 text-mute">
-                Identity and relay. Everything else stays simple on purpose.
+                Identity, relay, and workspace data.
               </p>
               <form
                 className="mt-8 space-y-4 rounded-3xl border border-line bg-paper p-5 shadow-sm"
@@ -455,14 +635,18 @@ export default function App() {
                     className="mt-1.5 w-full rounded-2xl border border-line bg-cream px-3 py-2.5 font-mono text-sm outline-none focus:border-honey"
                   />
                   <span className="mt-1 block text-xs text-mute">
-                    Local: use{" "}
-                    <code className="text-sky">/relay-ws</code> via Vite proxy
-                    or <code className="text-sky">ws://127.0.0.1:3000</code>
+                    Local:{" "}
+                    <code className="text-sky">/relay-ws</code> or{" "}
+                    <code className="text-sky">ws://127.0.0.1:3000</code>
                   </span>
                 </label>
                 <div className="rounded-2xl bg-cream px-3 py-2 font-mono text-[11px] text-mute">
                   <div>status: {conn}</div>
                   <div className="break-all">pubkey: {identity.pubkey}</div>
+                  <div>
+                    agents: {agents.length} · work: {work.length} · teams:{" "}
+                    {teams.length}
+                  </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <button
@@ -483,13 +667,35 @@ export default function App() {
                   >
                     New keypair
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      localStorage.removeItem("cockpit.agents.v2");
+                      localStorage.removeItem("cockpit.work.v2");
+                      localStorage.removeItem("cockpit.teams.v2");
+                      setAgents(loadAgents());
+                      setWork(loadWork());
+                      setTeams(loadTeams());
+                      setInbox(DEMO_INBOX);
+                      push("Workspace reset to demo defaults");
+                    }}
+                    className="rounded-2xl border border-line px-4 py-2.5 text-sm text-mute hover:text-ink"
+                  >
+                    Reset workspace data
+                  </button>
                 </div>
               </form>
+              <p className="mt-6 text-sm text-mute leading-relaxed">
+                <strong className="text-ink">Agents in Cockpit</strong> are fully
+                managed here (create, edit, teams, @mentions). When a live relay
+                is connected, notes can sync as stream events; managed agent
+                processes still run via the Buzz desktop/ACP harness on that
+                same hive.
+              </p>
             </div>
           )}
         </main>
 
-        {/* Mobile nav */}
         <nav className="flex border-t border-line bg-paper sm:hidden">
           {navItems.map(({ id, label, icon: Icon }) => (
             <button
@@ -511,12 +717,10 @@ export default function App() {
         </nav>
       </div>
 
-      {/* Search modal */}
       {searchOpen && (
         <div
           className="fixed inset-0 z-40 flex items-start justify-center bg-ink/30 px-4 pt-[12vh] backdrop-blur-sm"
           onClick={() => setSearchOpen(false)}
-          onKeyDown={() => {}}
         >
           <div
             className="animate-pop w-full max-w-lg overflow-hidden rounded-3xl border border-line bg-paper shadow-2xl"
@@ -540,7 +744,7 @@ export default function App() {
               )}
               {!searchQ && (
                 <li className="px-3 py-4 text-center text-sm text-mute">
-                  Try “login”, “Honey”, or “release”
+                  Try “login”, “Honey”, or create an agent and search their name
                 </li>
               )}
               {searchHits.map((h) => (

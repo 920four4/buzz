@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { ArrowLeft, Bot, Plus, Send, Users } from "lucide-react";
+import { ArrowLeft, Bot, Plus, UserPlus, Users, X } from "lucide-react";
 import clsx from "clsx";
 import type { Agent, WorkItem } from "@/lib/demo";
 import { AgentAvatar } from "./AgentAvatar";
+import { MentionComposer } from "./MentionComposer";
 import { useToast } from "@/lib/toast";
 
 const statusLabel = {
@@ -19,6 +20,8 @@ export function WorkView({
   onSelect,
   onAddNote,
   onCreate,
+  onAssignAgent,
+  onRemoveAgent,
 }: {
   work: WorkItem[];
   agents: Agent[];
@@ -26,16 +29,20 @@ export function WorkView({
   onSelect: (id: string | null) => void;
   onAddNote: (workId: string, text: string) => void;
   onCreate: (title: string) => void;
+  onAssignAgent: (workId: string, agentId: string) => void;
+  onRemoveAgent: (workId: string, agentId: string) => void;
 }) {
   const selected = work.find((w) => w.id === selectedId) ?? null;
-  const [draft, setDraft] = useState("");
   const [creating, setCreating] = useState(false);
   const [newTitle, setNewTitle] = useState("");
+  const [pickerOpen, setPickerOpen] = useState(false);
   const { push } = useToast();
 
   if (selected) {
     const meta = statusLabel[selected.status];
     const roomAgents = agents.filter((a) => selected.agentIds.includes(a.id));
+    const available = agents.filter((a) => !selected.agentIds.includes(a.id));
+
     return (
       <div className="mx-auto flex h-full max-w-3xl flex-col px-4 py-6 sm:px-6">
         <button
@@ -64,13 +71,102 @@ export function WorkView({
             {selected.title}
           </h1>
           <p className="mt-2 text-mute leading-relaxed">{selected.goal}</p>
-          <div className="mt-4 flex items-center gap-2">
-            {roomAgents.map((a) => (
-              <div key={a.id} className="flex items-center gap-2 rounded-full border border-line bg-paper py-1 pl-1 pr-3">
-                <AgentAvatar agent={a} size="sm" />
-                <span className="text-sm font-medium">{a.name}</span>
+
+          <div className="mt-4">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-semibold uppercase tracking-wide text-mute">
+                Agents on this work
+              </span>
+              <button
+                type="button"
+                onClick={() => setPickerOpen((o) => !o)}
+                className="inline-flex items-center gap-1 text-xs font-semibold text-honey-deep hover:underline"
+              >
+                <UserPlus className="size-3.5" />
+                Add agent
+              </button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {roomAgents.map((a) => (
+                <div
+                  key={a.id}
+                  className="group flex items-center gap-2 rounded-full border border-line bg-paper py-1 pl-1 pr-2"
+                >
+                  <AgentAvatar agent={a} size="sm" />
+                  <span className="text-sm font-medium">{a.name}</span>
+                  <button
+                    type="button"
+                    title={`Remove ${a.name}`}
+                    className="rounded-full p-0.5 text-mute opacity-0 hover:bg-coral-soft hover:text-coral group-hover:opacity-100"
+                    onClick={() => {
+                      onRemoveAgent(selected.id, a.id);
+                      push(`Removed ${a.name}`);
+                    }}
+                  >
+                    <X className="size-3" />
+                  </button>
+                </div>
+              ))}
+              {roomAgents.length === 0 && (
+                <span className="text-sm text-mute">
+                  No agents yet — add one or @mention in a note
+                </span>
+              )}
+            </div>
+
+            {pickerOpen && (
+              <ul className="mt-2 max-h-48 overflow-y-auto rounded-2xl border border-line bg-paper py-1 shadow-md">
+                {available.length === 0 && (
+                  <li className="px-3 py-2 text-sm text-mute">
+                    All agents already on this work
+                  </li>
+                )}
+                {available.map((a) => (
+                  <li key={a.id}>
+                    <button
+                      type="button"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-cream"
+                      onClick={() => {
+                        onAssignAgent(selected.id, a.id);
+                        setPickerOpen(false);
+                        push(`${a.name} joined “${selected.title}”`);
+                      }}
+                    >
+                      <AgentAvatar agent={a} size="sm" />
+                      <span className="font-medium">{a.name}</span>
+                      <span className="truncate text-xs text-mute">
+                        {a.role}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {/* Quick tag chips */}
+            {agents.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                <span className="text-[11px] text-mute self-center">
+                  Quick tag:
+                </span>
+                {agents.slice(0, 6).map((a) => (
+                  <button
+                    key={a.id}
+                    type="button"
+                    className="rounded-full bg-lilac-soft px-2.5 py-0.5 text-xs font-medium text-lilac hover:brightness-95"
+                    onClick={() => {
+                      onAddNote(
+                        selected.id,
+                        `@${a.name} please take a look at this work`,
+                      );
+                      push(`Tagged @${a.name}`);
+                    }}
+                  >
+                    @{a.name}
+                  </button>
+                ))}
               </div>
-            ))}
+            )}
           </div>
         </header>
 
@@ -95,39 +191,23 @@ export function WorkView({
                 </span>
                 <span className="font-mono text-mute">{u.when}</span>
               </div>
-              <p className="mt-1.5 text-[15px] leading-relaxed text-ink-soft">
-                {u.text}
+              <p className="mt-1.5 whitespace-pre-wrap text-[15px] leading-relaxed text-ink-soft">
+                {highlightMentions(u.text, agents)}
               </p>
             </article>
           ))}
         </div>
 
-        <form
-          className="sticky bottom-0 mt-2 flex gap-2 border-t border-line bg-cream/90 py-3 backdrop-blur"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const t = draft.trim();
-            if (!t) return;
-            onAddNote(selected.id, t);
-            setDraft("");
-            push("Note added");
-          }}
-        >
-          <input
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="Add a note to this work…"
-            className="flex-1 rounded-2xl border border-line bg-paper px-4 py-3 text-sm shadow-sm outline-none focus:border-honey"
+        <div className="sticky bottom-0 mt-2 border-t border-line bg-cream/90 py-3 backdrop-blur">
+          <MentionComposer
+            agents={agents}
+            placeholder="Note or task… Type @ to tag an agent"
+            onSend={(text) => {
+              onAddNote(selected.id, text);
+              push("Sent");
+            }}
           />
-          <button
-            type="submit"
-            disabled={!draft.trim()}
-            className="inline-flex items-center gap-2 rounded-2xl bg-ink px-4 py-3 text-sm font-semibold text-paper disabled:opacity-40"
-          >
-            <Send className="size-4" />
-            Send
-          </button>
-        </form>
+        </div>
       </div>
     );
   }
@@ -141,7 +221,7 @@ export function WorkView({
             What you’re finishing
           </h1>
           <p className="mt-2 max-w-md text-mute">
-            Not channels — goals. Open one, see people and agents, leave a note.
+            Goals, not channels. Open one, add agents, tag them with @Name.
           </p>
         </div>
         <button
@@ -248,4 +328,32 @@ export function WorkView({
       </div>
     </div>
   );
+}
+
+function highlightMentions(text: string, agents: Agent[]) {
+  if (!text.includes("@")) return text;
+  const names = [...agents]
+    .map((a) => a.name)
+    .sort((a, b) => b.length - a.length);
+  if (names.length === 0) return text;
+
+  const pattern = new RegExp(
+    `(@(?:${names.map(escapeRegExp).join("|")}))`,
+    "gi",
+  );
+  const parts = text.split(pattern);
+  return parts.map((part, i) => {
+    if (part.startsWith("@")) {
+      return (
+        <span key={i} className="font-semibold text-lilac">
+          {part}
+        </span>
+      );
+    }
+    return <span key={i}>{part}</span>;
+  });
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
