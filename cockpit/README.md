@@ -6,44 +6,41 @@ A **human-first** client for [Buzz](https://github.com/block/buzz) — not Slack
 |-----|------------|
 | **Inbox** | Things that need a human (approve / unblock / reply) |
 | **Work** | Goals as cards — not `#channels` |
-| **Agents** | Teammates with faces |
+| **Agents** | Create, edit, assign, team up |
 | **Messages** | Side chats only |
 
-Same foundation: NIP-42 auth, stream messages, agent identity. Different front door.
-
-Interactive preview works offline; connect a local relay when you want live events.
-
 **Live:** https://buzz-cockpit-coral.vercel.app
+
+## Agent functionality (full local product surface)
+
+| Action | How |
+|--------|-----|
+| **Create** | Agents → **New agent** (name, role, model, color) |
+| **Edit / stop / delete** | Click agent card |
+| **Assign to work** | Agent detail → pick work, **or** Work → **Add agent** |
+| **@tag** | In a work note type `@` → autocomplete → Send |
+| **Quick tag** | Chips under work header (`@Honey`, …) |
+| **Teams** | Agents → **New team** → add whole crew to work |
+| **Persist** | Agents / work / teams in `localStorage` |
+
+@mention flow: agent **joins** the work → status **Working** → **replies in-thread**.
 
 ## Quick start
 
 ```bash
-# relay (repo root)
 . ./bin/activate-hermit
-just setup && just relay   # ws://127.0.0.1:3000
-
-# cockpit
-cd cockpit
-pnpm install
-pnpm dev                   # http://127.0.0.1:5174
-# or: portless alias → https://cockpit.localhost:1355
+just cockpit-up            # full stack
+# or
+pnpm --dir cockpit dev     # http://127.0.0.1:5174
 ```
 
-## Try the demo (what “works” means)
-
-1. **Inbox → Approve** release notes — toast, card slides away, work marks done  
-2. **Allow** Honey — agent flips to Working, work unblocks  
-3. **Work → open a card → add a note**  
-4. **Agents** — stop running, inspect status  
-5. **⌘K** — search work / inbox / agents  
+Hard-refresh the browser if an old build is cached.
 
 ## Deploy
 
 ```bash
-cd cockpit
-vercel --prod --yes --scope 920four4s-projects
+just cockpit-deploy
+# or: cd cockpit && vercel --prod --yes --scope 920four4s-projects
 ```
 
-Optional env: `VITE_BUZZ_RELAY_WS`, `VITE_BUZZ_RELAY_AUTH_URL`
-
-Git author for this fork: `team@920four.com`
+Git author: `team@920four.com` · Runbook: [../COCKPIT.md](../COCKPIT.md)
